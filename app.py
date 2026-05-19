@@ -116,6 +116,7 @@ def _agent_run_with_retry(agent, trigger: dict, max_retries: int = 3):
     Waits 5s → 10s → 20s between attempts before re-raising.
     """
     import time as _time
+    from loguru import logger as _logger
     last_exc = None
     for attempt in range(max_retries):
         try:
@@ -126,7 +127,7 @@ def _agent_run_with_retry(agent, trigger: dict, max_retries: int = 3):
             if "529" in err_str or "overloaded" in err_str.lower():
                 if attempt < max_retries - 1:
                     wait = 5 * (2 ** attempt)   # 5s, 10s, 20s
-                    logger.warning(
+                    _logger.warning(
                         f"[Cascade] 529 overloaded on attempt {attempt+1} — "
                         f"retrying in {wait}s"
                     )
@@ -138,187 +139,55 @@ def _agent_run_with_retry(agent, trigger: dict, max_retries: int = 3):
 
 def _run_cascade(trigger: dict, agents: dict, wo_store, gen: int = 0, ml_pipeline=None):
     """
-    Full agent chain for one alarm trigger. Runs in a background thread.
-    Tier 2: Watchkeeper → Diagnostics → Planner
-    Tier 3: Watchkeeper → Diagnostics → Planner + ISM Compliance + Fleet Intel
+    v3.0 — Watchkeeper-as-orchestrator.
+    Creates the incident record, injects context into Watchkeeper, then runs it once.
+    Watchkeeper calls all subagents (diagnostics, planner, compliance, fleet_intel, evaluator)
+    via tool calls — no hardcoded Python cascade.
     """
-    asset_id        = trigger.get("asset_id", "fleet")
-    metric          = trigger.get("metric", "")
-    tier            = trigger.get("tier", 2)
-    compliance_code = trigger.get("compliance_code") or ""
-    tier_tag        = f"T{tier}" + (" SOLAS" if tier >= 3 else "")
+    asset_id = trigger.get("asset_id", "fleet")
+    metric   = trigger.get("metric", "")
+    tier     = trigger.get("tier", 2)
+    tier_tag = f"T{tier}" + (" SOLAS" if tier >= 3 else "")
 
-    # Helper: returns True if fleet was reset since this cascade was spawned
-    def _stale() -> bool:
-        return _fleet_generation[0] != gen
-
-    # Create incident record — bail immediately if already reset
-    if _stale():
+    if _fleet_generation[0] != gen:
         return
-    inc = incident_store.create_incident(trigger)
+
+    # Create incident record
+    inc    = incident_store.create_incident(trigger)
     inc_id = inc.incident_id
 
     log_activity("🚨", "System", asset_id,
                  f"{inc_id} opened — {tier_tag} | {metric} alarm")
 
-    # ── Step 1: Watchkeeper ──────────────────────────────────────────────
-    if _stale(): return
+    # Inject orchestration context into Watchkeeper
+    wk_agent = agents["watchkeeper"]
+    wk_agent.ctx["incident_id"] = inc_id
+    wk_agent.ctx["tier"]        = tier
+    wk_agent.ctx["ml_pipeline"] = ml_pipeline
+
+    # Start Watchkeeper step in incident store
+    incident_store.start_step(inc_id, "watchkeeper")
+    log_activity("🔭", "Watchkeeper", asset_id,
+                 f"{inc_id} — orchestrating full chain (T{tier})")
+
     try:
-        incident_store.start_step(inc_id, "watchkeeper")
-        log_activity("🔭", "Watchkeeper", asset_id,
-                     f"{inc_id} — confirming breach & cross-correlating sensors")
-        wk_result  = _agent_run_with_retry(agents["watchkeeper"], trigger)
-        if _stale(): return
+        # Watchkeeper runs the entire chain via subagent tool calls
+        wk_result  = _agent_run_with_retry(wk_agent, trigger)
+        if _fleet_generation[0] != gen:
+            return
         wk_summary = _first_line(wk_result.full_reasoning)
-        incident_store.complete_watchkeeper(inc_id, wk_summary, len(wk_result.actions_taken),
-                                            full_output=wk_result.full_reasoning)
+        incident_store.complete_watchkeeper(
+            inc_id, wk_summary,
+            len(wk_result.actions_taken),
+            full_output=wk_result.full_reasoning,
+        )
         log_activity("✅", "Watchkeeper", asset_id,
-                     f"{inc_id} — {len(wk_result.actions_taken)} calls · {wk_summary[:70]}")
+                     f"{inc_id} — chain complete · {len(wk_result.actions_taken)} calls · {wk_summary[:60]}")
     except Exception as e:
-        if _stale(): return
+        if _fleet_generation[0] != gen:
+            return
         incident_store.complete_watchkeeper(inc_id, f"Error: {e}", 0)
         log_activity("❌", "Watchkeeper", asset_id, f"{inc_id} — error: {e}")
-        return
-
-    # ── Step 1.5: ML Analysis (runs after watchkeeper, before diagnostics) ──
-    if _stale(): return
-    ml_result  = None
-    ml_summary = "ML analysis not available"
-    try:
-        incident_store.start_step(inc_id, "ml_analysis")
-        log_activity("🧠", "ML Pipeline", asset_id,
-                     f"{inc_id} — HF feature extraction + anomaly detection")
-
-        # Get asset type from inventory
-        from data.inventory import ASSETS as _ASSETS
-        _asset = _ASSETS.get(asset_id)
-        _asset_type = _asset.asset_type.value if _asset else "Unknown"
-
-        # Get CEP health + RUL for conservative blending
-        _derived = cep.latest_derived.get(asset_id)
-        _cep_health = _derived.overall_health_score if _derived else None
-        _cep_rul    = _derived.rul_days if _derived else None
-
-        _ml_pipeline = ml_pipeline
-        if _ml_pipeline:
-            ml_result = _ml_pipeline.analyze(
-                asset_id=asset_id,
-                asset_type=_asset_type,
-                duration_s=120,
-                cep_health=_cep_health,
-                cep_rul=_cep_rul,
-            )
-            incident_store.complete_ml_analysis(inc_id, ml_result)
-            ml_summary = (
-                f"{ml_result.fault_class.replace('_',' ')} p={ml_result.fault_probability:.2f} "
-                f"· anomaly={ml_result.anomaly_score:.2f} · RUL={ml_result.rul_days:.1f}d"
-            )
-            log_activity("✅", "ML Pipeline", asset_id,
-                         f"{inc_id} — {ml_summary}")
-        else:
-            incident_store.complete_ml_analysis(inc_id, None)
-    except Exception as e:
-        if _stale(): return
-        log_activity("⚠️", "ML Pipeline", asset_id, f"{inc_id} — ML analysis error: {e}")
-        try:
-            incident_store.complete_ml_analysis(inc_id, None)
-        except Exception:
-            pass
-
-    # ── Step 2: Deep Diagnostics ─────────────────────────────────────────
-    if _stale(): return
-    try:
-        incident_store.start_step(inc_id, "diagnostics")
-        log_activity("🔬", "Diagnostics", asset_id,
-                     f"{inc_id} — root cause analysis started")
-        # Enrich diagnostics trigger with ML results
-        diag_trigger = {
-            "asset_id":     asset_id,
-            "reason":       trigger.get("reason", metric),
-            "incident_id":  inc_id,
-            "ml_fault_class": ml_result.fault_class if ml_result else None,
-            "ml_narrative": ml_result.narrative[:500] if ml_result else None,
-        }
-        diag_result  = _agent_run_with_retry(agents["diagnostics"], diag_trigger)
-        if _stale(): return
-        diag_summary = _first_line(diag_result.full_reasoning)
-        incident_store.complete_diagnostics(inc_id, diag_summary, len(diag_result.actions_taken),
-                                            full_output=diag_result.full_reasoning)
-        log_activity("✅", "Diagnostics", asset_id,
-                     f"{inc_id} — {len(diag_result.actions_taken)} calls · {diag_summary[:70]}")
-    except Exception as e:
-        if _stale(): return
-        incident_store.complete_diagnostics(inc_id, f"Error: {e}", 0)
-        log_activity("❌", "Diagnostics", asset_id, f"{inc_id} — error: {e}")
-        return
-
-    # ── Step 3: Maintenance Planner ──────────────────────────────────────
-    if _stale(): return
-    try:
-        incident_store.start_step(inc_id, "planner")
-        log_activity("📋", "Planner", asset_id,
-                     f"{inc_id} — creating work order from diagnostic findings")
-        wo_count_before = len(wo_store.get_all_work_orders(limit=50))
-        plan_trigger = {"asset_id": asset_id,
-                        "diagnostic_summary": diag_summary,
-                        "incident_id": inc_id}
-        plan_result  = _agent_run_with_retry(agents["planner"], plan_trigger)
-        if _stale(): return
-        plan_summary = _first_line(plan_result.full_reasoning)
-        wo_id        = _latest_wo_id(wo_store, wo_count_before)
-        incident_store.complete_planner(inc_id, plan_summary, wo_id, len(plan_result.actions_taken),
-                                        full_output=plan_result.full_reasoning)
-        log_activity("✅", "Planner", asset_id,
-                     f"{inc_id} — WO {wo_id or 'created'} · {plan_summary[:60]}")
-    except Exception as e:
-        if _stale(): return
-        incident_store.complete_planner(inc_id, f"Error: {e}", None, 0)
-        log_activity("❌", "Planner", asset_id, f"{inc_id} — error: {e}")
-
-    # ── Step 4 + 5: ISM Compliance + Fleet Intel (Tier 3 only) ──────────
-    if tier >= 3:
-        if _stale(): return
-        try:
-            incident_store.start_step(inc_id, "compliance")
-            log_activity("⚖️", "ISM Compliance", asset_id,
-                         f"{inc_id} — {compliance_code} compliance check started")
-            comp_trigger = {
-                "asset_id": asset_id,
-                "context":  f"{compliance_code} critical alarm: {metric} = "
-                            f"{trigger.get('value', 0):.2f} {trigger.get('unit', '')}",
-                "incident_id": inc_id,
-            }
-            comp_result  = _agent_run_with_retry(agents["compliance"], comp_trigger)
-            if _stale(): return
-            comp_summary = _first_line(comp_result.full_reasoning)
-            comp_status  = _extract_compliance_status(comp_result.full_reasoning)
-            incident_store.complete_compliance(inc_id, comp_summary, comp_status,
-                                               len(comp_result.actions_taken),
-                                               full_output=comp_result.full_reasoning)
-            log_activity("✅", "ISM Compliance", asset_id,
-                         f"{inc_id} — {comp_status} · {comp_summary[:60]}")
-        except Exception as e:
-            if _stale(): return
-            incident_store.complete_compliance(inc_id, f"Error: {e}", "Unknown", 0)
-            log_activity("❌", "ISM Compliance", asset_id, f"{inc_id} — error: {e}")
-
-        if _stale(): return
-        try:
-            incident_store.start_step(inc_id, "fleet_intel")
-            log_activity("🌐", "Fleet Intel", "fleet",
-                         f"{inc_id} — fleet advisory update started")
-            fi_trigger = {"asset_id": asset_id, "incident_id": inc_id}
-            fi_result  = _agent_run_with_retry(agents["fleet_intel"], fi_trigger)
-            if _stale(): return
-            fi_summary = _first_line(fi_result.full_reasoning)
-            incident_store.complete_fleet_intel(inc_id, fi_summary, len(fi_result.actions_taken),
-                                                full_output=fi_result.full_reasoning)
-            log_activity("✅", "Fleet Intel", "fleet",
-                         f"{inc_id} — advisory issued · {fi_summary[:60]}")
-        except Exception as e:
-            if _stale(): return
-            incident_store.complete_fleet_intel(inc_id, f"Error: {e}", 0)
-            log_activity("❌", "Fleet Intel", "fleet", f"{inc_id} — error: {e}")
 
 
 # ── Stack initialisation (runs once per session) ───────────────────────
@@ -1236,7 +1105,14 @@ with tab5:
                     done  = inc.steps_done
                     total = inc.steps_total_active
                     st.metric("Steps", f"{done}/{total}")
-                    if inc.wo_id:
+                    if inc.evaluator_score is not None:
+                        score_color = "#00C853" if inc.evaluator_score >= 80 else "#FFD600" if inc.evaluator_score >= 60 else "#D50000"
+                        st.markdown(
+                            f"<span style='color:{score_color};font-size:0.82em;font-weight:600'>"
+                            f"⚡ QA: {inc.evaluator_score}/100</span>",
+                            unsafe_allow_html=True,
+                        )
+                    elif inc.wo_id:
                         st.caption(f"WO: {inc.wo_id}")
                 st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1326,7 +1202,7 @@ with tab5:
                     "error":   "#D50000",
                 }
                 _STEP_ORDER = ["watchkeeper", "ml_analysis", "diagnostics", "planner",
-                               "compliance", "fleet_intel"]
+                               "compliance", "fleet_intel", "evaluator"]
 
                 for step_name in _STEP_ORDER:
                     step = inc.steps.get(step_name)

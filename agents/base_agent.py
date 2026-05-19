@@ -34,6 +34,7 @@ class BaseAgent:
     name: str = "base_agent"
     role_title: str = "AI Agent"
     max_tool_rounds: int = 6
+    max_tokens: int = 4096      # override in subclass for orchestrators
 
     def __init__(self, ctx: dict):
         """
@@ -133,7 +134,7 @@ class BaseAgent:
     def _call_claude(self, messages: list, tools: list) -> Message:
         kwargs: dict[str, Any] = {
             "model":      self.model,
-            "max_tokens": 4096,
+            "max_tokens": self.max_tokens,
             "system": [
                 {
                     "type": "text",

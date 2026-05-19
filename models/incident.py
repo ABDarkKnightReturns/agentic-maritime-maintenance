@@ -69,16 +69,20 @@ class IncidentRecord:
     status: str = "Open"              # Open / Pending Approval / Resolved
     resolved_at: Optional[datetime] = None
 
-    # ML analysis result — populated in parallel with diagnostics
+    # ML analysis result — populated when Diagnostics calls get_hf_analysis
     ml_result: Optional[Any] = None   # MLAnalysisResult from ml.models
+
+    # Evaluator score — set by EvaluatorAgent at chain end (0–100)
+    evaluator_score: Optional[int] = None
 
     def __post_init__(self):
         # Initialise step stubs for this tier
         base_steps = [
             AgentStep("watchkeeper",  "🔭", "Watchkeeper"),
-            AgentStep("ml_analysis",  "🧠", "ML Analysis"),   # NEW — runs in parallel
+            AgentStep("ml_analysis",  "🧠", "ML Analysis"),
             AgentStep("diagnostics",  "🔬", "Deep Diagnostics"),
             AgentStep("planner",      "📋", "Maintenance Planner"),
+            AgentStep("evaluator",    "⚡", "Chain Evaluator"),
         ]
         tier3_steps = [
             AgentStep("compliance",   "⚖️",  "ISM Compliance"),

@@ -109,6 +109,15 @@ def complete_fleet_intel(incident_id: str, advisory: str, tool_calls: int = 0,
             inc.fleet_advisory = advisory
 
 
+def complete_evaluator(incident_id: str, summary: str, score: int,
+                       tool_calls: int = 0, full_output: str = "") -> None:
+    _complete_step(incident_id, "evaluator", summary, tool_calls, full_output)
+    with _lock:
+        inc = _store.get(incident_id)
+        if inc:
+            inc.evaluator_score = score
+
+
 def _complete_step(incident_id: str, agent_name: str,
                    summary: str, tool_calls: int, full_output: str = "") -> None:
     with _lock:

@@ -222,6 +222,116 @@ TOOL_GET_HF_ANALYSIS = {
     },
 }
 
+# ── Subagent tools — Watchkeeper calls these to orchestrate the chain ─────────
+
+TOOL_CALL_DIAGNOSTICS = {
+    "name": "call_deep_diagnostics",
+    "description": (
+        "Escalate to the Deep Diagnostics agent for full root cause analysis, ML anomaly "
+        "detection, and RUL estimation. Call this AFTER confirming the alarm is real. "
+        "Returns a detailed diagnostic report including fault class, severity, and "
+        "recommended action. Do NOT call if the alarm appears to be a sensor glitch."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "asset_id": {"type": "string", "description": "Asset ID to investigate"},
+            "reason":   {"type": "string", "description": "Your watchkeeper findings that justify escalation (2–3 sentences)"},
+            "severity": {"type": "string", "enum": ["medium", "high", "critical"],
+                         "description": "Your assessed severity based on breach level and cross-correlation"},
+        },
+        "required": ["asset_id", "reason", "severity"],
+    },
+}
+
+TOOL_CALL_PLANNER = {
+    "name": "call_maintenance_planner",
+    "description": (
+        "Call the Maintenance Planner agent to create a draft work order based on "
+        "the diagnostic findings. Call this AFTER receiving the diagnostic report. "
+        "Returns the created work order ID and scheduling details. "
+        "Always call this unless diagnostics found no fault (normal/healthy state)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "asset_id":           {"type": "string"},
+            "diagnostic_summary": {"type": "string",
+                                   "description": "Key findings from diagnostics (fault class, RUL, recommended action)"},
+        },
+        "required": ["asset_id", "diagnostic_summary"],
+    },
+}
+
+TOOL_CALL_COMPLIANCE = {
+    "name": "call_compliance_check",
+    "description": (
+        "Call the ISM Compliance agent to assess regulatory obligations. "
+        "Use for SOLAS-critical assets (COMP-001 starting air, AUXGEN-001 generator) "
+        "or when a compliance code was flagged in the alarm. Returns compliance status "
+        "and any non-conformities found."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "asset_id": {"type": "string"},
+            "context":  {"type": "string",
+                         "description": "Alarm context including compliance code (e.g. SOLAS-II-1/28) and metric values"},
+        },
+        "required": ["asset_id", "context"],
+    },
+}
+
+TOOL_CALL_FLEET_INTEL = {
+    "name": "call_fleet_intelligence",
+    "description": (
+        "Call the Fleet Intelligence agent to update the fleet-wide advisory report. "
+        "Use for SOLAS/ISM-critical incidents (Tier 3). Returns an executive summary "
+        "with fleet risk ranking, cost outlook, and strategic recommendations."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "asset_id": {"type": "string", "description": "Primary asset triggering the fleet review"},
+        },
+        "required": ["asset_id"],
+    },
+}
+
+TOOL_CALL_EVALUATOR = {
+    "name": "call_chain_evaluator",
+    "description": (
+        "Call the Chain Evaluator agent to score the quality of this entire incident response. "
+        "ALWAYS call this as the LAST step of every chain, after all other agents have completed. "
+        "Returns a structured quality assessment with scores per agent and an overall verdict."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "incident_id": {"type": "string", "description": "The incident ID for this chain"},
+            "chain_summary": {"type": "string",
+                              "description": "Your 1–2 sentence summary of what the chain found and decided"},
+        },
+        "required": ["incident_id", "chain_summary"],
+    },
+}
+
+TOOL_GET_INCIDENT_REPORT = {
+    "name": "get_incident_chain_report",
+    "description": (
+        "Retrieves the complete agent chain outputs for a specific incident. "
+        "Returns all agent step outputs, tool call counts, timing, and results. "
+        "Used by the Chain Evaluator to assess chain quality."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "incident_id": {"type": "string", "description": "Incident ID e.g. INC-2026-001"},
+        },
+        "required": ["incident_id"],
+    },
+}
+
 TOOL_KB_RETRIEVE = {
     "name": "kb_retrieve",
     "description": (
@@ -341,7 +451,7 @@ def execute_tool(name: str, tool_input: dict, ctx: dict) -> str:
                 "next_pm":     asset.next_scheduled_maintenance.isoformat() if asset.next_scheduled_maintenance else None,
             })
         overview.sort(key=lambda x: (x["health_score"] or 100))
-        return json.dumps({"vessel": "MV-Eindhoven", "assets": overview})
+        return json.dumps({"vessel": "MV-Callisto", "assets": overview})
 
     elif name == "get_recent_alerts":
         asset_id = tool_input["asset_id"]
@@ -399,7 +509,7 @@ def execute_tool(name: str, tool_input: dict, ctx: dict) -> str:
                            "awaiting": "Chief Engineer approval"})
 
     elif name == "get_port_schedule":
-        return json.dumps({"vessel": "MV-Eindhoven", "port_calls": PORT_SCHEDULE})
+        return json.dumps({"vessel": "MV-Callisto", "port_calls": PORT_SCHEDULE})
 
     elif name == "get_ism_requirements":
         asset_type = tool_input["asset_type"]
@@ -436,14 +546,19 @@ def execute_tool(name: str, tool_input: dict, ctx: dict) -> str:
     elif name == "get_hf_analysis":
         asset_id   = tool_input["asset_id"]
         duration_s = min(int(tool_input.get("duration_s", 120)), 600)
+        incident_id = ctx.get("incident_id")
         try:
             from ml.pipeline import MLPipeline
             from storage.hf_store import hf_store
+            import pipeline.incident_store as _inc_store
+
+            # Mark ml_analysis step as running in incident store
+            if incident_id:
+                _inc_store.start_step(incident_id, "ml_analysis")
 
             # Get ML pipeline from context (injected by app.py) or create one on demand
             ml_pipeline = ctx.get("ml_pipeline")
             if ml_pipeline is None:
-                # Fallback: construct a new pipeline (will use synthetic baseline)
                 ml_pipeline = MLPipeline(hf_store)
 
             # Get asset type from inventory (ASSETS imported at module level)
@@ -465,9 +580,282 @@ def execute_tool(name: str, tool_input: dict, ctx: dict) -> str:
                 cep_health=cep_health,
                 cep_rul=cep_rul,
             )
+
+            # Update incident store ml_analysis step
+            if incident_id:
+                _inc_store.complete_ml_analysis(incident_id, result, tool_calls=1)
+
             return json.dumps(result.to_agent_dict(), default=str)
 
         except Exception as e:
+            if incident_id:
+                try:
+                    import pipeline.incident_store as _inc_store2
+                    _inc_store2.complete_ml_analysis(incident_id, None, tool_calls=0)
+                except Exception:
+                    pass
             return json.dumps({"error": f"HF analysis failed: {str(e)}", "asset_id": asset_id})
+
+    # ── Subagent orchestration tools ──────────────────────────────────────────
+
+    elif name == "call_deep_diagnostics":
+        import pipeline.incident_store as _inc_store
+        agents     = ctx.get("agents", {})
+        incident_id = ctx.get("incident_id")
+        asset_id   = tool_input["asset_id"]
+        reason     = tool_input.get("reason", "")
+        severity   = tool_input.get("severity", "medium")
+
+        diag_agent = agents.get("diagnostics")
+        if diag_agent is None:
+            return json.dumps({"error": "DiagnosticsAgent not available in context"})
+
+        # Propagate incident_id into diagnostics agent context
+        diag_agent.ctx["incident_id"] = incident_id
+        diag_agent.ctx["ml_pipeline"] = ctx.get("ml_pipeline")
+
+        if incident_id:
+            _inc_store.start_step(incident_id, "diagnostics")
+
+        trigger = {"asset_id": asset_id, "reason": reason, "severity": severity,
+                   "incident_id": incident_id}
+        try:
+            result = diag_agent.run(trigger)
+            summary = result.summary[:200]
+            if incident_id:
+                _inc_store.complete_diagnostics(
+                    incident_id, summary,
+                    tool_calls=len(result.actions_taken),
+                    full_output=result.full_reasoning,
+                )
+            return json.dumps({
+                "status": "diagnostics_complete",
+                "asset_id": asset_id,
+                "summary": summary,
+                "full_report": result.full_reasoning[:4000],
+                "tool_calls": len(result.actions_taken),
+            })
+        except Exception as e:
+            if incident_id:
+                _inc_store.complete_diagnostics(incident_id, f"Error: {e}", tool_calls=0)
+            return json.dumps({"error": f"Diagnostics failed: {str(e)}", "asset_id": asset_id})
+
+    elif name == "call_maintenance_planner":
+        import pipeline.incident_store as _inc_store
+        agents     = ctx.get("agents", {})
+        incident_id = ctx.get("incident_id")
+        asset_id   = tool_input["asset_id"]
+        diag_summary = tool_input.get("diagnostic_summary", "")
+
+        planner_agent = agents.get("planner")
+        if planner_agent is None:
+            return json.dumps({"error": "PlannerAgent not available in context"})
+
+        planner_agent.ctx["incident_id"] = incident_id
+
+        if incident_id:
+            _inc_store.start_step(incident_id, "planner")
+
+        trigger = {"asset_id": asset_id, "diagnostic_summary": diag_summary,
+                   "incident_id": incident_id}
+        try:
+            result = planner_agent.run(trigger)
+            summary = result.summary[:200]
+
+            # Extract work order ID from actions
+            wo_id = None
+            for action in result.actions_taken:
+                if action.get("tool") == "create_work_order":
+                    try:
+                        out = json.loads(action.get("output", "{}"))
+                        wo_id = out.get("work_order_id")
+                    except Exception:
+                        pass
+                    if wo_id:
+                        break
+
+            if incident_id:
+                _inc_store.complete_planner(
+                    incident_id, summary, wo_id,
+                    tool_calls=len(result.actions_taken),
+                    full_output=result.full_reasoning,
+                )
+            return json.dumps({
+                "status": "planning_complete",
+                "asset_id": asset_id,
+                "work_order_id": wo_id,
+                "summary": summary,
+                "full_report": result.full_reasoning[:4000],
+            })
+        except Exception as e:
+            if incident_id:
+                _inc_store.complete_planner(incident_id, f"Error: {e}", None, tool_calls=0)
+            return json.dumps({"error": f"Planner failed: {str(e)}", "asset_id": asset_id})
+
+    elif name == "call_compliance_check":
+        import pipeline.incident_store as _inc_store
+        agents     = ctx.get("agents", {})
+        incident_id = ctx.get("incident_id")
+        asset_id   = tool_input["asset_id"]
+        context_str = tool_input.get("context", "")
+
+        compliance_agent = agents.get("compliance")
+        if compliance_agent is None:
+            return json.dumps({"error": "ComplianceAgent not available in context"})
+
+        compliance_agent.ctx["incident_id"] = incident_id
+
+        if incident_id:
+            _inc_store.start_step(incident_id, "compliance")
+
+        trigger = {"asset_id": asset_id, "context": context_str,
+                   "incident_id": incident_id}
+        try:
+            result = compliance_agent.run(trigger)
+            summary = result.summary[:200]
+
+            # Extract compliance status from full reasoning
+            import re as _re
+            status = "UNKNOWN"
+            for keyword in ("COMPLIANT", "MAJOR NC", "MINOR NC"):
+                if keyword in result.full_reasoning.upper():
+                    status = keyword
+                    break
+
+            if incident_id:
+                _inc_store.complete_compliance(
+                    incident_id, summary, status,
+                    tool_calls=len(result.actions_taken),
+                    full_output=result.full_reasoning,
+                )
+            return json.dumps({
+                "status": "compliance_complete",
+                "asset_id": asset_id,
+                "compliance_status": status,
+                "summary": summary,
+                "full_report": result.full_reasoning[:4000],
+            })
+        except Exception as e:
+            if incident_id:
+                _inc_store.complete_compliance(incident_id, f"Error: {e}", "ERROR", tool_calls=0)
+            return json.dumps({"error": f"Compliance check failed: {str(e)}", "asset_id": asset_id})
+
+    elif name == "call_fleet_intelligence":
+        import pipeline.incident_store as _inc_store
+        agents     = ctx.get("agents", {})
+        incident_id = ctx.get("incident_id")
+        asset_id   = tool_input["asset_id"]
+
+        fleet_agent = agents.get("fleet_intel")
+        if fleet_agent is None:
+            return json.dumps({"error": "FleetIntelAgent not available in context"})
+
+        fleet_agent.ctx["incident_id"] = incident_id
+
+        if incident_id:
+            _inc_store.start_step(incident_id, "fleet_intel")
+
+        trigger = {"asset_id": asset_id, "incident_id": incident_id}
+        try:
+            result = fleet_agent.run(trigger)
+            advisory = result.summary[:200]
+
+            if incident_id:
+                _inc_store.complete_fleet_intel(
+                    incident_id, advisory,
+                    tool_calls=len(result.actions_taken),
+                    full_output=result.full_reasoning,
+                )
+            return json.dumps({
+                "status": "fleet_intel_complete",
+                "asset_id": asset_id,
+                "advisory": advisory,
+                "full_report": result.full_reasoning[:4000],
+            })
+        except Exception as e:
+            if incident_id:
+                _inc_store.complete_fleet_intel(incident_id, f"Error: {e}", tool_calls=0)
+            return json.dumps({"error": f"Fleet intel failed: {str(e)}", "asset_id": asset_id})
+
+    elif name == "call_chain_evaluator":
+        import pipeline.incident_store as _inc_store
+        agents      = ctx.get("agents", {})
+        incident_id = tool_input.get("incident_id") or ctx.get("incident_id")
+        chain_summary = tool_input.get("chain_summary", "")
+
+        evaluator_agent = agents.get("evaluator")
+        if evaluator_agent is None:
+            return json.dumps({"error": "EvaluatorAgent not available in context"})
+
+        evaluator_agent.ctx["incident_id"] = incident_id
+
+        if incident_id:
+            _inc_store.start_step(incident_id, "evaluator")
+
+        trigger = {"incident_id": incident_id, "chain_summary": chain_summary,
+                   "asset_id": ctx.get("asset_id", "unknown")}
+        try:
+            result = evaluator_agent.run(trigger)
+            summary = result.summary[:200]
+
+            # Extract overall score from reasoning — look for "Overall Score: N/100"
+            import re as _re
+            score = 75  # default
+            m = _re.search(r"Overall Score[:\s]+(\d+)\s*/\s*100", result.full_reasoning, _re.IGNORECASE)
+            if m:
+                score = int(m.group(1))
+
+            if incident_id:
+                _inc_store.complete_evaluator(
+                    incident_id, summary, score,
+                    tool_calls=len(result.actions_taken),
+                    full_output=result.full_reasoning,
+                )
+            return json.dumps({
+                "status": "evaluation_complete",
+                "incident_id": incident_id,
+                "overall_score": score,
+                "summary": summary,
+                "full_report": result.full_reasoning[:4000],
+            })
+        except Exception as e:
+            if incident_id:
+                _inc_store.complete_evaluator(incident_id, f"Error: {e}", 0, tool_calls=0)
+            return json.dumps({"error": f"Evaluator failed: {str(e)}", "incident_id": incident_id})
+
+    elif name == "get_incident_chain_report":
+        import pipeline.incident_store as _inc_store
+        incident_id = tool_input["incident_id"]
+        inc = _inc_store.get_by_id(incident_id)
+        if not inc:
+            return json.dumps({"error": f"Incident {incident_id} not found"})
+
+        steps_data = {}
+        for step_name, step in inc.steps.items():
+            steps_data[step_name] = {
+                "status":      step.status,
+                "label":       step.label,
+                "tool_calls":  step.tool_calls,
+                "duration_s":  round(step.duration_s, 1),
+                "summary":     step.summary,
+                "full_output": step.full_output[:3000] if step.full_output else "",
+            }
+
+        return json.dumps({
+            "incident_id":   inc.incident_id,
+            "asset_id":      inc.asset_id,
+            "metric":        inc.metric,
+            "tier":          inc.tier,
+            "tier_label":    inc.tier_label,
+            "triggered_at":  inc.triggered_at.isoformat(),
+            "trigger_value": inc.trigger_value,
+            "trigger_unit":  inc.trigger_unit,
+            "status":        inc.status,
+            "wo_id":         inc.wo_id,
+            "compliance_status": inc.compliance_status,
+            "fleet_advisory": inc.fleet_advisory,
+            "evaluator_score": inc.evaluator_score,
+            "steps":         steps_data,
+        }, default=str)
 
     return json.dumps({"error": f"Unknown tool: {name}"})

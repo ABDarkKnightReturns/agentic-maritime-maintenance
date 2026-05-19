@@ -1,49 +1,74 @@
 """
-Agent 1 — Realtime Watchkeeper
-Maritime analogy: 2nd Engineer on watch (engine room watch)
+Agent 1 — Realtime Watchkeeper  (v3.0 — Primary Orchestrator)
+Maritime analogy: Chief Engineer directing the incident response chain
 
 Triggered by AlarmManager when a sensor metric breaches a threshold.
-Receives the specific breach context (asset, metric, value, limit, source).
-Raises structured alerts and cross-correlates with related sensors.
-Cannot be manually dismissed — runs until the breach condition resolves.
+Confirms the alarm, then orchestrates the full response chain by calling
+subagent tools: diagnostics → planner → (compliance + fleet_intel if T3)
+→ chain evaluator.
 """
 from datetime import datetime, timezone
 from agents.base_agent import BaseAgent
 from agents.tools import (
     TOOL_GET_FLEET_OVERVIEW, TOOL_GET_ASSET_HEALTH,
     TOOL_GET_TELEMETRY_TREND, TOOL_RAISE_ALERT,
+    TOOL_CALL_DIAGNOSTICS, TOOL_CALL_PLANNER,
+    TOOL_CALL_COMPLIANCE, TOOL_CALL_FLEET_INTEL,
+    TOOL_CALL_EVALUATOR,
 )
 
 
 class RealtimeWatchkeeper(BaseAgent):
 
     name = "realtime_watchkeeper"
-    role_title = "2nd Engineer (AI Watch)"
-    max_tool_rounds = 8
+    role_title = "Chief Engineer (AI Orchestrator)"
+    max_tool_rounds = 30
+    max_tokens = 8192
 
     def _build_system_prompt(self) -> str:
-        return """You are the AI Realtime Watchkeeper aboard MV-Callisto, acting as the 2nd Engineer on engine room watch.
+        return """You are the AI Realtime Watchkeeper aboard MV-Callisto, acting as the Chief Engineer orchestrating the incident response chain.
 
-You are triggered automatically when a sensor metric breaches a defined limit. Your job is NOT to scan everything — the CEP engine has already identified the breach. Your job is to:
+You are triggered automatically when a sensor metric breaches a defined threshold. You are the PRIMARY ORCHESTRATOR — you confirm the alarm and then direct the full response chain by calling specialist agents.
 
-1. CONFIRM — verify the breach is real (not a sensor glitch) by checking the trend
-2. CROSS-CORRELATE — check related sensors to understand the pattern:
-   - Vibration spike + bearing temp rise → bearing degradation
-   - Vibration + efficiency drop → mechanical wear
-   - Compressor efficiency drop + high discharge temp → valve failure
-   - Purifier bowl deviation + motor current rise → disc fouling
-   - Generator frequency deviation + exhaust temp spread → governor/injector
-3. RAISE ALERT — with precise values, the breached limit, its source, and your assessment
-4. SUMMARISE — brief watch entry: what breached, what it indicates, what action is needed
+## YOUR MANDATORY WORKFLOW
 
-ALERT SEVERITY RULES:
-- Breached Warning limit only → raise "Warning"
-- Breached Alarm limit → raise "Alarm"
-- SOLAS-critical equipment (COMP-001, AUXGEN-001) at Alarm → raise "Critical"
-- Multiple metrics breaching simultaneously on one asset → raise "Critical"
+### STEP 1 — CONFIRM THE ALARM
+Call get_asset_health(asset_id) and get_telemetry_trend(asset_id, tag) to verify the breach.
+- Check if the breach is sustained (real) vs. a transient spike (sensor noise).
+- Cross-correlate with related sensors to understand the pattern.
+- Call raise_alert() with the correct severity:
+  - Warning limit only → "Warning"
+  - Alarm limit breached → "Alarm"
+  - SOLAS-critical (COMP-001, AUXGEN-001) at Alarm → "Critical"
+  - Multiple simultaneous breaches on one asset → "Critical"
 
-Be specific: always quote the observed value, the limit, and its regulatory source.
-Example: "Vibration 7.4 mm/s — breached Alarm limit 7.1 mm/s (ISO 10816-3 Zone C/D boundary)"."""
+### STEP 2 — ESCALATE TO DEEP DIAGNOSTICS
+Unless the breach is clearly sensor noise, call call_deep_diagnostics(asset_id, reason, severity).
+- Pass your cross-correlation findings as the reason (2–3 sentences).
+- Wait for the diagnostic report before proceeding.
+
+### STEP 3 — CREATE WORK ORDER
+Unless diagnostics returned "normal/healthy" (no fault), call call_maintenance_planner(asset_id, diagnostic_summary).
+- Summarise the diagnostic report for the planner.
+
+### STEP 4 — COMPLIANCE AND FLEET INTEL (Tier 3 only)
+If the tier is 3 (SOLAS/ISM critical — check your initial trigger message):
+- Call call_compliance_check(asset_id, context) with the alarm and compliance code.
+- Call call_fleet_intelligence(asset_id) for fleet-wide advisory.
+Both calls can be made regardless of order.
+
+### STEP 5 — CHAIN EVALUATION (ALWAYS LAST)
+After all other steps are complete, ALWAYS call call_chain_evaluator(incident_id, chain_summary).
+- Provide a 1–2 sentence chain_summary of what was found and decided.
+- This step is mandatory for every chain, regardless of tier.
+
+## CRITICAL RULES — CHECK BEFORE EVERY RESPONSE
+- Complete all steps in order — do not skip any.
+- **After your last subagent call (fleet_intel for T3, planner for T2) your VERY NEXT tool call MUST be call_chain_evaluator. Do not write any text response first.**
+- Pass the exact incident_id from the trigger to call_chain_evaluator.
+- If a subagent returns an error, note it but continue to the next step.
+- NEVER end your loop without calling call_chain_evaluator — it is mandatory for every chain regardless of tier.
+- Only write your final watch log text AFTER call_chain_evaluator has returned a result."""
 
     def _get_tools(self) -> list[dict]:
         return [
@@ -51,39 +76,57 @@ Example: "Vibration 7.4 mm/s — breached Alarm limit 7.1 mm/s (ISO 10816-3 Zone
             TOOL_GET_ASSET_HEALTH,
             TOOL_GET_TELEMETRY_TREND,
             TOOL_RAISE_ALERT,
+            TOOL_CALL_DIAGNOSTICS,
+            TOOL_CALL_PLANNER,
+            TOOL_CALL_COMPLIANCE,
+            TOOL_CALL_FLEET_INTEL,
+            TOOL_CALL_EVALUATOR,
         ]
 
     def _build_user_message(self, trigger: dict | None = None) -> str:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        incident_id = (trigger or {}).get("incident_id", "UNKNOWN")
+        tier        = (trigger or {}).get("tier", 2)
+        tier_label  = "TIER 3 — SOLAS/ISM CRITICAL" if tier >= 3 else "TIER 2 — INVESTIGATE"
 
         if trigger and trigger.get("asset_id") and trigger.get("metric") != "manual":
-            asset_id  = trigger["asset_id"]
-            metric    = trigger["metric"]
-            level     = trigger["level"]
-            value     = trigger["value"]
-            threshold = trigger["threshold"]
-            unit      = trigger["unit"]
-            source    = trigger.get("source", "")
+            asset_id      = trigger["asset_id"]
+            metric        = trigger["metric"]
+            level         = trigger["level"]
+            value         = trigger["value"]
+            threshold     = trigger["threshold"]
+            unit          = trigger["unit"]
+            source        = trigger.get("source", "")
+            compliance_code = trigger.get("compliance_code", "")
+            compliance_note = f"\nCompliance code: {compliance_code}" if compliance_code else ""
             return (
-                f"THRESHOLD BREACH ALERT — {now}\n"
+                f"THRESHOLD BREACH — {now}\n"
+                f"Incident ID: {incident_id} | {tier_label}\n"
                 f"Asset: {asset_id}\n"
                 f"Metric: {metric} = {value:.2f} {unit}\n"
-                f"Breached: {level} limit {threshold} {unit} ({source})\n\n"
-                f"Confirm the breach, cross-correlate with related sensors, "
-                f"raise an alert with the appropriate severity and your assessment."
+                f"Breached: {level} limit {threshold} {unit} ({source})"
+                f"{compliance_note}\n\n"
+                f"Execute the full incident response chain:\n"
+                f"1. Confirm alarm → 2. call_deep_diagnostics → 3. call_maintenance_planner"
+                f"{' → 4. call_compliance_check + call_fleet_intelligence' if tier >= 3 else ''}"
+                f" → {'5' if tier >= 3 else '4'}. call_chain_evaluator(incident_id='{incident_id}')\n\n"
+                f"Always end with call_chain_evaluator using incident_id='{incident_id}'."
             )
 
         if trigger and trigger.get("asset_id"):
             asset_id = trigger["asset_id"]
             return (
-                f"Watch check requested for {asset_id} — {now}. "
-                f"Review asset condition, check for any anomalies or threshold "
-                f"breaches, and raise alerts where warranted."
+                f"Watch check requested for {asset_id} — {now}\n"
+                f"Incident ID: {incident_id} | {tier_label}\n\n"
+                f"Review asset condition, check for anomalies, raise alerts where warranted, "
+                f"then execute the full chain. Always end with "
+                f"call_chain_evaluator(incident_id='{incident_id}')."
             )
 
         return (
-            f"Engine room watch check — {now}. Vessel: MV-Callisto. "
-            "Perform a systematic watch round. Check all monitored machinery for "
-            "anomalies, threshold breaches, and deteriorating trends. "
-            "Raise alerts where warranted. Report your findings."
+            f"Engine room watch check — {now}. Vessel: MV-Callisto.\n"
+            f"Incident ID: {incident_id} | {tier_label}\n\n"
+            "Perform a systematic watch round across all assets. Raise alerts where warranted. "
+            f"If any anomalies are found, run the full chain. "
+            f"Always end with call_chain_evaluator(incident_id='{incident_id}')."
         )
