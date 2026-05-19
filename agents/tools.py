@@ -250,14 +250,22 @@ TOOL_CALL_PLANNER = {
         "Call the Maintenance Planner agent to create a draft work order based on "
         "the diagnostic findings. Call this AFTER receiving the diagnostic report. "
         "Returns the created work order ID and scheduling details. "
-        "Always call this unless diagnostics found no fault (normal/healthy state)."
+        "Always call this unless diagnostics found no fault (normal/healthy state). "
+        "Pass the FULL diagnostic report so the Planner can make an informed work order."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
             "asset_id":           {"type": "string"},
             "diagnostic_summary": {"type": "string",
-                                   "description": "Key findings from diagnostics (fault class, RUL, recommended action)"},
+                                   "description": "One-line summary: fault class, severity, recommended action"},
+            "full_diagnostic_report": {"type": "string",
+                                       "description": "Complete diagnostic findings including ML results, CEP evidence, "
+                                                       "KB references, RUL estimate, and root cause analysis. "
+                                                       "Copy the full_report field from call_deep_diagnostics response."},
+            "watchkeeper_assessment": {"type": "string",
+                                       "description": "Your own cross-correlated assessment as Watchkeeper — "
+                                                       "alarm context, severity rationale, and recommended urgency."},
         },
         "required": ["asset_id", "diagnostic_summary"],
     },
@@ -266,10 +274,9 @@ TOOL_CALL_PLANNER = {
 TOOL_CALL_COMPLIANCE = {
     "name": "call_compliance_check",
     "description": (
-        "Call the ISM Compliance agent to assess regulatory obligations. "
-        "Use for SOLAS-critical assets (COMP-001 starting air, AUXGEN-001 generator) "
-        "or when a compliance code was flagged in the alarm. Returns compliance status "
-        "and any non-conformities found."
+        "Call the ISM Compliance agent to assess ISM/SOLAS regulatory obligations for the affected asset. "
+        "Call this for ALL incidents — every asset has ISM maintenance obligations. "
+        "Returns compliance status and any non-conformities found."
     ),
     "input_schema": {
         "type": "object",
@@ -653,8 +660,15 @@ def execute_tool(name: str, tool_input: dict, ctx: dict) -> str:
         if incident_id:
             _inc_store.start_step(incident_id, "planner")
 
-        trigger = {"asset_id": asset_id, "diagnostic_summary": diag_summary,
-                   "incident_id": incident_id}
+        full_diag_report = tool_input.get("full_diagnostic_report", "")
+        wk_assessment    = tool_input.get("watchkeeper_assessment", "")
+        trigger = {
+            "asset_id":               asset_id,
+            "diagnostic_summary":     diag_summary,
+            "full_diagnostic_report": full_diag_report,
+            "watchkeeper_assessment": wk_assessment,
+            "incident_id":            incident_id,
+        }
         try:
             result = planner_agent.run(trigger)
             summary = result.summary[:200]

@@ -74,15 +74,28 @@ Do NOT mark anything as approved — that is a human decision."""
     def _build_user_message(self, trigger: dict | None = None) -> str:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         if trigger and trigger.get("asset_id"):
-            asset_id = trigger["asset_id"]
+            asset_id         = trigger["asset_id"]
+            diag_summary     = trigger.get("diagnostic_summary", "anomaly detected")
+            full_diag_report = trigger.get("full_diagnostic_report", "")
+            wk_assessment    = trigger.get("watchkeeper_assessment", "")
+
+            context_block = f"Diagnostic summary: {diag_summary}"
+            if full_diag_report:
+                context_block += f"\n\nFull diagnostic report from Deep Diagnostics:\n{full_diag_report}"
+            if wk_assessment:
+                context_block += f"\n\nWatchkeeper assessment:\n{wk_assessment}"
+
             return (
-                f"Maintenance planning triggered for {asset_id} — {now}. "
-                f"Diagnostic finding: {trigger.get('diagnostic_summary', 'anomaly detected')}. "
-                "Follow the mandatory workflow: "
-                "(1) Gather context using get_asset_health, get_maintenance_history, get_recent_alerts, get_port_schedule, and kb_retrieve. "
-                "(2) Call create_work_order to create the work order — you MUST call this tool, not just describe it. "
-                "(3) After create_work_order succeeds, summarise the work order and note CE approval is required. "
-                "Do not end your response before calling create_work_order."
+                f"Maintenance planning triggered for {asset_id} — {now}.\n\n"
+                f"{context_block}\n\n"
+                "Use the diagnostic findings above as your primary input — do NOT re-derive the fault "
+                "or contradict the diagnostic report. Your job is to translate these findings into a "
+                "work order that is correctly timed, resourced, and scoped.\n\n"
+                "Follow the mandatory workflow:\n"
+                "(1) Gather supplementary context — call get_asset_health, get_maintenance_history, "
+                "get_recent_alerts, get_port_schedule, and kb_retrieve.\n"
+                "(2) Call create_work_order — you MUST call this tool. Do not end without calling it.\n"
+                "(3) After create_work_order succeeds, summarise the WO and note CE approval is required."
             )
         return (
             f"Maintenance planning cycle — {now}. Vessel: MV-Callisto. "

@@ -1163,8 +1163,13 @@ with tab5:
                 expanded=(inc.status == "Open" and not inc.chain_complete),
             ):
                 # ── 🧠 ML Analysis Results panel ──────────────────────
+                # Only render AFTER Deep Diagnostics has completed — results
+                # are produced by Diagnostics calling get_hf_analysis, so
+                # showing them mid-step would imply ML ran independently.
                 _ml = getattr(inc, "ml_result", None)
-                if _ml and not getattr(_ml, "error", None):
+                _diag_step = inc.steps.get("diagnostics")
+                _diag_done = _diag_step and _diag_step.status == "done"
+                if _ml and not getattr(_ml, "error", None) and _diag_done:
                     ml = _ml
                     st.markdown(
                         "<div style='background:#9C27B015;border:1px solid #9C27B066;"

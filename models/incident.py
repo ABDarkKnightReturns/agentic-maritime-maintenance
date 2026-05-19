@@ -76,31 +76,20 @@ class IncidentRecord:
     evaluator_score: Optional[int] = None
 
     def __post_init__(self):
-        # Initialise step stubs for this tier
-        base_steps = [
+        # Full 6-agent chain runs for ALL incidents regardless of tier.
+        # ISM Compliance and Fleet Intelligence provide value even for
+        # non-SOLAS alarms (maintenance history patterns, fleet-wide context).
+        all_steps = [
             AgentStep("watchkeeper",  "🔭", "Watchkeeper"),
             AgentStep("diagnostics",  "🔬", "Deep Diagnostics"),
             AgentStep("planner",      "📋", "Maintenance Planner"),
-            AgentStep("evaluator",    "⚡", "Chain Evaluator"),
-        ]
-        tier3_steps = [
             AgentStep("compliance",   "⚖️",  "ISM Compliance"),
             AgentStep("fleet_intel",  "🌐", "Fleet Intelligence"),
+            AgentStep("evaluator",    "⚡", "Chain Evaluator"),
         ]
-        all_steps = base_steps + (tier3_steps if self.tier >= 3 else [])
         for s in all_steps:
             s.status = "pending"
             self.steps[s.agent_name] = s
-        # Mark tier-3-only steps as skipped for tier-2 incidents
-        if self.tier < 3:
-            for name in ("compliance", "fleet_intel"):
-                self.steps[name] = AgentStep(
-                    name,
-                    "⚖️" if name == "compliance" else "🌐",
-                    "ISM Compliance" if name == "compliance" else "Fleet Intelligence",
-                    status="skipped",
-                    summary="Not triggered — Tier 2 alarm (non-SOLAS parameter)",
-                )
 
     @property
     def tier_label(self) -> str:

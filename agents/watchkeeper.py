@@ -51,11 +51,11 @@ Unless the breach is clearly sensor noise, call call_deep_diagnostics(asset_id, 
 Unless diagnostics returned "normal/healthy" (no fault), call call_maintenance_planner(asset_id, diagnostic_summary).
 - Summarise the diagnostic report for the planner.
 
-### STEP 4 — COMPLIANCE AND FLEET INTEL (Tier 3 only)
-If the tier is 3 (SOLAS/ISM critical — check your initial trigger message):
-- Call call_compliance_check(asset_id, context) with the alarm and compliance code.
-- Call call_fleet_intelligence(asset_id) for fleet-wide advisory.
-Both calls can be made regardless of order.
+### STEP 4 — COMPLIANCE AND FLEET INTEL (ALL incidents — mandatory)
+Always call BOTH of these agents for every incident, regardless of tier:
+- Call call_compliance_check(asset_id, context) — assess ISM/SOLAS obligations for the affected asset.
+- Call call_fleet_intelligence(asset_id) — retrieve fleet-wide patterns and advisory.
+Both calls can be made in either order (they are independent).
 
 ### STEP 5 — CHAIN EVALUATION (ALWAYS LAST)
 After all other steps are complete, ALWAYS call call_chain_evaluator(incident_id, chain_summary).
@@ -63,11 +63,13 @@ After all other steps are complete, ALWAYS call call_chain_evaluator(incident_id
 - This step is mandatory for every chain, regardless of tier.
 
 ## CRITICAL RULES — CHECK BEFORE EVERY RESPONSE
-- Complete all steps in order — do not skip any.
-- **After your last subagent call (fleet_intel for T3, planner for T2) your VERY NEXT tool call MUST be call_chain_evaluator. Do not write any text response first.**
+- Complete ALL 5 steps in order — do not skip any, regardless of tier.
+- Steps 4 (compliance + fleet_intel) are MANDATORY for every incident — not just SOLAS/Tier 3.
+- When calling call_maintenance_planner, always include full_diagnostic_report (copy the full_report from diagnostics response) and watchkeeper_assessment (your own cross-correlated alarm assessment).
+- **After fleet_intel completes, your VERY NEXT tool call MUST be call_chain_evaluator. Do not write any text response first.**
 - Pass the exact incident_id from the trigger to call_chain_evaluator.
 - If a subagent returns an error, note it but continue to the next step.
-- NEVER end your loop without calling call_chain_evaluator — it is mandatory for every chain regardless of tier.
+- NEVER end your loop without calling call_chain_evaluator — it is mandatory for every chain.
 - Only write your final watch log text AFTER call_chain_evaluator has returned a result."""
 
     def _get_tools(self) -> list[dict]:
@@ -106,10 +108,12 @@ After all other steps are complete, ALWAYS call call_chain_evaluator(incident_id
                 f"Metric: {metric} = {value:.2f} {unit}\n"
                 f"Breached: {level} limit {threshold} {unit} ({source})"
                 f"{compliance_note}\n\n"
-                f"Execute the full incident response chain:\n"
-                f"1. Confirm alarm → 2. call_deep_diagnostics → 3. call_maintenance_planner"
-                f"{' → 4. call_compliance_check + call_fleet_intelligence' if tier >= 3 else ''}"
-                f" → {'5' if tier >= 3 else '4'}. call_chain_evaluator(incident_id='{incident_id}')\n\n"
+                f"Execute the FULL 5-step incident response chain (mandatory for ALL tiers):\n"
+                f"1. Confirm alarm (get_asset_health + get_telemetry_trend + raise_alert)\n"
+                f"2. call_deep_diagnostics → wait for full diagnostic report\n"
+                f"3. call_maintenance_planner — pass full_diagnostic_report + watchkeeper_assessment\n"
+                f"4. call_compliance_check + call_fleet_intelligence (BOTH, in any order)\n"
+                f"5. call_chain_evaluator(incident_id='{incident_id}') — ALWAYS LAST\n\n"
                 f"Always end with call_chain_evaluator using incident_id='{incident_id}'."
             )
 
