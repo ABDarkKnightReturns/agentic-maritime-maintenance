@@ -79,7 +79,6 @@ class IncidentRecord:
         # Initialise step stubs for this tier
         base_steps = [
             AgentStep("watchkeeper",  "🔭", "Watchkeeper"),
-            AgentStep("ml_analysis",  "🧠", "ML Analysis"),
             AgentStep("diagnostics",  "🔬", "Deep Diagnostics"),
             AgentStep("planner",      "📋", "Maintenance Planner"),
             AgentStep("evaluator",    "⚡", "Chain Evaluator"),

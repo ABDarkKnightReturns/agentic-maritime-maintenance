@@ -550,18 +550,13 @@ def execute_tool(name: str, tool_input: dict, ctx: dict) -> str:
         try:
             from ml.pipeline import MLPipeline
             from storage.hf_store import hf_store
-            import pipeline.incident_store as _inc_store
-
-            # Mark ml_analysis step as running in incident store
-            if incident_id:
-                _inc_store.start_step(incident_id, "ml_analysis")
 
             # Get ML pipeline from context (injected by app.py) or create one on demand
             ml_pipeline = ctx.get("ml_pipeline")
             if ml_pipeline is None:
                 ml_pipeline = MLPipeline(hf_store)
 
-            # Get asset type from inventory (ASSETS imported at module level)
+            # Get asset type from inventory
             asset = ASSETS.get(asset_id)
             asset_type = asset.asset_type.value if asset else "Unknown"
 
@@ -581,19 +576,21 @@ def execute_tool(name: str, tool_input: dict, ctx: dict) -> str:
                 cep_rul=cep_rul,
             )
 
-            # Update incident store ml_analysis step
+            # Store ML result on the incident record so the UI can display it.
+            # This is the ONLY place ml_result is set — it happens when Deep Diagnostics
+            # decides to call get_hf_analysis, not as a hardcoded pipeline step.
             if incident_id:
-                _inc_store.complete_ml_analysis(incident_id, result, tool_calls=1)
+                try:
+                    import pipeline.incident_store as _inc_store
+                    inc = _inc_store.get_by_id(incident_id)
+                    if inc:
+                        inc.ml_result = result
+                except Exception:
+                    pass
 
             return json.dumps(result.to_agent_dict(), default=str)
 
         except Exception as e:
-            if incident_id:
-                try:
-                    import pipeline.incident_store as _inc_store2
-                    _inc_store2.complete_ml_analysis(incident_id, None, tool_calls=0)
-                except Exception:
-                    pass
             return json.dumps({"error": f"HF analysis failed: {str(e)}", "asset_id": asset_id})
 
     # ── Subagent orchestration tools ──────────────────────────────────────────

@@ -1201,7 +1201,7 @@ with tab5:
                     "skipped": "#37474F",
                     "error":   "#D50000",
                 }
-                _STEP_ORDER = ["watchkeeper", "ml_analysis", "diagnostics", "planner",
+                _STEP_ORDER = ["watchkeeper", "diagnostics", "planner",
                                "compliance", "fleet_intel", "evaluator"]
 
                 for step_name in _STEP_ORDER:
