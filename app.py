@@ -2,6 +2,7 @@
 MV-Callisto — Agentic AI Predictive Maintenance Demo
 NordVast Maritime Fleet Management Technology | Powered by Claude
 """
+import re as _re
 import sys
 import threading
 import time
@@ -188,6 +189,45 @@ def _run_cascade(trigger: dict, agents: dict, wo_store, gen: int = 0, ml_pipelin
             return
         incident_store.complete_watchkeeper(inc_id, f"Error: {e}", 0)
         log_activity("❌", "Watchkeeper", asset_id, f"{inc_id} — error: {e}")
+
+    # ── Evaluator safety net ──────────────────────────────────────────────
+    # If Watchkeeper completed without calling call_chain_evaluator
+    # (hit token/round limit), run it directly here as a guaranteed fallback.
+    if _fleet_generation[0] != gen:
+        return
+    inc_check = incident_store.get_by_id(inc_id)
+    if inc_check:
+        eval_step = inc_check.steps.get("evaluator")
+        if eval_step and eval_step.status == "pending":
+            log_activity("⚡", "Evaluator", asset_id,
+                         f"{inc_id} — Watchkeeper missed evaluator, running fallback")
+            try:
+                eval_agent = agents.get("evaluator")
+                if eval_agent:
+                    incident_store.start_step(inc_id, "evaluator")
+                    eval_agent.ctx["incident_id"] = inc_id
+                    eval_result = _agent_run_with_retry(
+                        eval_agent, {"incident_id": inc_id}
+                    )
+                    summary = _first_line(eval_result.full_reasoning) or "Chain evaluated (fallback)"
+                    score: int | None = None
+                    m = _re.search(
+                        r"Overall Score[:\s]+(\d+)\s*/\s*100",
+                        eval_result.full_reasoning, _re.IGNORECASE
+                    )
+                    if m:
+                        score = int(m.group(1))
+                    incident_store.complete_evaluator(
+                        inc_id, summary, score or 0,
+                        tool_calls=len(eval_result.actions_taken),
+                        full_output=eval_result.full_reasoning,
+                    )
+                    log_activity("✅", "Evaluator", asset_id,
+                                 f"{inc_id} — fallback eval done · score={score}/100")
+            except Exception as ev_e:
+                incident_store.complete_evaluator(inc_id, f"Fallback error: {ev_e}", 0)
+                log_activity("❌", "Evaluator", asset_id,
+                             f"{inc_id} — fallback evaluator error: {ev_e}")
 
 
 # ── Stack initialisation (runs once per session) ───────────────────────
