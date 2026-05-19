@@ -1,0 +1,38 @@
+# Secrets & environment
+.env
+.env.*
+.streamlit/secrets.toml
+config/secrets.py
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+
+# Logs
+*.log
+streamlit*.log
+
+# IDEs
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Large generated files (regenerate from .md)
+ARCHITECTURE_HF_ML.html
+
+# Personal interview prep PDFs
+*.pdf
+
